@@ -1,28 +1,29 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
-#include <PubSubClient.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+#include <WiFiClientSecure.h>
+#include "../include/Gsender.h"
+#include "../include/Gsender.cpp"
 
-
-// Data wire is plugged into digital pin 2 on the Arduino
+// El cable de datos está conectado al pin digital 2 de la esp8266
 #define ONE_WIRE_BUS 4
+#define ALARMA 10 //Temperatura en grados
 
-// Setup a oneWire instance to communicate with any OneWire device
+// Configuro una instancia de oneWire para comunicarse 
 OneWire oneWire(ONE_WIRE_BUS);  
 
-// Pass oneWire reference to DallasTemperature library
+// Pase la referencia oneWire a la biblioteca DallasTemperature
 DallasTemperature sensors(&oneWire);
 
+// CONFIG CODEIGNITER PHP
 
-//MQTT CONFIG
-
-const char* mqtt_server = "ioticos.org";
-const int mqtt_port = 1883;
-const char* mqtt_user = "GzcAFY1l7ss4j19";
-const char* mqtt_pass = "4E2HJE2x52gJUNE";
-const char* root_topic_subscribe = "uteG4UF6gNyIRSJ";
-const char* root_topic_publish = "uteG4UF6gNyIRSJ";
+const String serial_number = "12020";
+const String insert_password = "123456";
+const String get_data_password = "123456";
+const char*  server = "mdtemperatura.000webhostapp.com";
+const int httpsPort = 443;
+const char fingerprint[] PROGMEM = "5B FB D1 D4 49 D3 0F A9 C6 40 03 34 BA E0 24 05 AA D2 E2 01";
 
 //WIFI CONFIG
 
@@ -32,38 +33,28 @@ const char* password = "myc292016";
 //GLOBALES
 
 WiFiClient espClient;
-PubSubClient client(espClient);
-char msg[25];
+
+WiFiClientSecure client2;
+long milliseconds = 0;
+long timeMail =0;
+char msg[20];
 long count=0;
+float temp = 0;
+int hum = 0;
+String TramaMensajeGmail = "";
+bool mailEnviado = false;
+bool enviarMail = false;
 
-//FUNCIONES
+// FUNCIONES
 
-void callback (char* topic, byte* payload, unsigned int length);
-void reconnect();
 void setup_wifi();
+void send_to_database(float temp);
+void EnviarAlertaCorreo();
 
 void setup() {
     Serial.begin(115200);
     setup_wifi();
     sensors.begin();
-    client.setServer(mqtt_server, mqtt_port);
-    client.setCallback(callback);
-}
-
-void loop() {
-    if (!client.connected()) {
-        reconnect();
-    }
-    if (client.connected()) {
-       //String str = "La cuenta es -> " + String(count);
-        //str.toCharArray(msg,25);
-        sensors.requestTemperatures();
-        String temperatura = (String)sensors.getTempCByIndex(0);
-        client.publish(root_topic_publish,temperatura.c_str());
-        count++;
-        delay(10000);
-    }
-    client.loop();
 }
 
 //CONEXION WIFI
@@ -88,42 +79,105 @@ void setup_wifi() {
     Serial.println(WiFi.localIP());
 }
 
-//CONEXION MQTT
+void loop() {
+    if (millis() - milliseconds > 900000) {   //900000 son 15 min. 60000 es 1 min.
+      milliseconds = millis();
+      timeMail--;
+      sensors.requestTemperatures();
+      String msg = String (sensors.getTempCByIndex(0));
+     
+      send_to_database(msg.toFloat());
+        
+      bool alarmaTemperatura = msg.toInt() > ALARMA;
+      
+      if(alarmaTemperatura){
+        enviarMail= true;
+      }
 
-void reconnect() {
-    while (!client.connected()) {
-        Serial.print("Intentando conectar a mqtt...");
-        //Creo un cliente id
-        String clientId = "IOTICOS_H_W";
-        clientId += String(random(0xffff), HEX);
-        //Intentamos conectar
-        if (client.connect(clientId.c_str(), mqtt_user,mqtt_pass)) {
-            Serial.println("Conectado");
-            //me suscribo
-            if (client.subscribe(root_topic_subscribe)) {
-                Serial.println("Suscripcion ok");
-            }else{
-                Serial.println("Fallo la suscripcion");
-            }
-        }else{
-            Serial.print("fallo :( con error -> ");
-            Serial.print(client.state());
-            Serial.println("Intentamos de nuevo en 5 segundos");
-            delay(5000);
-        }
-    }
+      if (enviarMail && !mailEnviado && timeMail<=0){
+        EnviarAlertaCorreo();
+        mailEnviado = true;
+        enviarMail=false;
+        timeMail=900000;
+      }      
+ }
 }
 
-//CALLBACK
+void send_to_database(float temp){
 
-void callback(char* topic, byte* payload, unsigned int length) {
-    String incoming = "";
-    Serial.print("Mensaje recibido desde -> ");
-    Serial.print(topic);
-    Serial.print("");
-    for (int i = 0; i < length; i++) {
-        incoming += (char)payload[i];
+  Serial.println("\nIniciando conexión segura para enviar a base de datos...");
+  
+  Serial.printf("Using fingerprint '%s'\n", fingerprint);
+  client2.setFingerprint(fingerprint);
+  client2.setTimeout(15000); // 15 segundos
+
+  if (!client2.connect(server, httpsPort)) {
+    Serial.println("Falló conexión!");
+  }else {
+    Serial.println("Conectados a servidor para insertar en db - ok");
+    // hago la solicitud HTTP:
+    String data = "idp="+insert_password+"&sn="+serial_number+"&temp="+String(temp)+"&hum="+1+"\r\n";
+    String post;
+    post = (String("POST ") + "/app/insertdata/insert" + " HTTP/1.1\r\n" +\
+                 "Host: " + server + "\r\n" +\
+                 "Content-Type: application/x-www-form-urlencoded"+ "\r\n" +\
+                 "Content-Length: " + String (data.length()) + "\r\n\r\n" +\
+                 data +\
+                 "Connection: close\r\n\r\n");
+    client2.print(post);
+
+    Serial.println("Solicitud enviada - ok");
+    Serial.println(post);
+
+    while (client2.connected()) {
+      String line = client2.readStringUntil('\n');
+      if (line == "\r") {
+        Serial.println("Headers recibidos - ok");
+        break;
+      }
     }
-    incoming.trim();
-    Serial.println("Mensaje -> " + incoming);
+
+
+    String line;
+    while(client2.available()){
+      line += client2.readStringUntil('\n');
+    }
+    Serial.println(line);
+    client2.stop();
+
+    }
+
+  }
+
+  void EnviarAlertaCorreo (void){   
+
+    Gsender *gsender = Gsender::Instance();  
+    
+    String subject = "MENSAJE - ESTADO SENSOR";
+
+    TramaMensajeGmail += "<html>"; 
+    TramaMensajeGmail += "<body>"; 
+
+    TramaMensajeGmail += "<h1>ALERTA SENSOR ACTIVADO</h1>"; 
+    TramaMensajeGmail += "<br>";
+    
+    TramaMensajeGmail += "<p>"; 
+    TramaMensajeGmail += "<b>El contacto magnetico ha sido abierto</b>."; 
+    TramaMensajeGmail += "<br>";
+    TramaMensajeGmail += "<b>se requiere de atención inmediata</b>.";
+     
+    TramaMensajeGmail += "</p>"; 
+    TramaMensajeGmail += "</body>"; 
+    TramaMensajeGmail += "</html>";
+    
+    if(gsender->Subject(subject)->Send("cdlsolu@gmail.com", TramaMensajeGmail)) {
+       
+      delay(1000);
+      Serial.println("MENSAJE ENVIADO EXITOSAMENTE");
+           
+    } else {
+        
+        Serial.print("ERROR AL ENVIAR EL MENSAJE: ");
+        Serial.println(gsender->getError());
+    }
 }
